@@ -44,7 +44,7 @@ def test_unreachable_backend_keeps_service_available_and_decide_is_503(monkeypat
 
 
 def test_settings_only_describe_supported_controls():
-    assert {item.key for item in SETTINGS} == {"update_check_hours", "max_inflight", "cache_size", "warm"}
+    assert {item.key for item in SETTINGS} == {"update_check_hours", "max_inflight", "cache_size", "ollama_model", "warm"}
 
 
 def test_missing_model_returns_503_then_recovers_when_pulled(monkeypatch):

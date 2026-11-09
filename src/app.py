@@ -21,6 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 import strategies
 from answers import check_questions
+import hardware
+import variants
 from cache import AnswerCache
 from engine import DEFAULT_MODEL, D3Engine, EngineError, default_marker
 from ollama_backend import OllamaUpdates, engine_from_env
@@ -107,6 +109,10 @@ class Threads(BaseModel):
     num_thread: int = Field(ge=1, le=256)
 
 
+class VariantChoice(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+
+
 def create_app(client: D3Engine | None = None, admin_password: str | None = None,
                tokens: TokenStore | None = None, warm: bool = False,
                updates: Updates | None = None, check_hours: float = 0, max_inflight: int | None = None,
@@ -117,7 +123,7 @@ def create_app(client: D3Engine | None = None, admin_password: str | None = None
     many answers per replica (SERVICE_CACHE_SIZE). `config` (the admin page's settings) replaces `warm`, `check_hours`,
     `max_inflight` and `cache_size` and keeps them live; without it they stay fixed."""
     tokens = tokens or TokenStore(os.environ.get("SERVICE_TOKENS_FILE", "tokens.json"))
-    client = client or engine_from_env("SERVICE_", D3Engine, DEFAULT_MODEL, marker=default_marker())
+    client = client or engine_from_env("SERVICE_", D3Engine, DEFAULT_MODEL, settings=config, marker=default_marker())
     inflight = 0
     cache = AnswerCache()
 
@@ -372,6 +378,33 @@ def create_app(client: D3Engine | None = None, admin_password: str | None = None
         settings.save(tokens.settings_path, num_thread=body.num_thread)
         return {"num_thread": client.num_thread}
 
+    async def variant_rows() -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """What this machine has (None when Ollama is on another machine) and every quantization with its estimate and
+        whether it fits. Read when asked, never cached."""
+        hw = await asyncio.to_thread(hardware.probe) if client.same_machine else None
+        return hw, variants.listing(hw, client.model, await client.downloaded())
+
+    @app.get("/admin/variants", dependencies=[Depends(admin)])
+    async def list_variants() -> dict[str, Any]:
+        hw, rows = await variant_rows()
+        return {"hardware": hw, "summary": hardware.describe(hw), "variants": rows, "estimate": "Estimated from the file size; not measured."}
+
+    @app.put("/admin/variant", dependencies=[Depends(admin)])
+    async def choose_variant(body: VariantChoice) -> dict[str, Any]:
+        """Saves the Ollama model name. It is read at start, so a restart applies it."""
+        if config is None:
+            raise HTTPException(409, "Settings are fixed in this setup")
+        row = variants.find((await variant_rows())[1], body.id)
+        if row is None:
+            raise HTTPException(404, "No such variant.")
+        if row["fits"] is False:
+            raise HTTPException(409, row["reason"])
+        try:
+            config.set({"ollama_model": row["model"]})
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        return {"saved": row["id"], "restart_required": not row["current"], "downloaded": row["downloaded"]}
+
     @app.get("/admin/workers", dependencies=[Depends(admin)])
     def workers() -> dict[str, Any]:
         """Read-only: the replica count is a Docker Compose setting the service cannot change."""
@@ -472,7 +505,7 @@ def main() -> None:
             print(".env.local / .env: no file in the service folder", flush=True)
     store = TokenStore(os.environ.get("SERVICE_TOKENS_FILE", "tokens.json"))
     config = settings.Config(store.settings_path, SETTINGS)
-    client = engine_from_env("SERVICE_", D3Engine, DEFAULT_MODEL, marker=default_marker())
+    client = engine_from_env("SERVICE_", D3Engine, DEFAULT_MODEL, settings=config, marker=default_marker())
     saved = settings.load(store.settings_path)
     threads = saved.get("num_thread") or os.environ.get("SERVICE_NUM_THREAD", "").strip()
     if threads:

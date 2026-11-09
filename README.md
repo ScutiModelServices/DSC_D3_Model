@@ -47,7 +47,7 @@ Laya's two-model strategies (`english-only`, `typed-only`, `english-then-typed`,
 
 ## Admin page
 
-Open `/admin/` with `SERVICE_ADMIN_PASSWORD`. Tokens, usage, replicas, Settings and Updates share the standard model-service page. CPU thread values are saved and reported only; Ollama chooses its own threads. Settings retain update-check hours, in-flight cap, answer cache size and warm-up. The model name is the startup value `SERVICE_OLLAMA_MODEL`.
+Open `/admin/` with `SERVICE_ADMIN_PASSWORD`. Tokens, usage, replicas, Settings, Updates and the Model variant card (choose a d3 size this machine can run, with estimated memory use) share the standard model-service page. CPU thread values are saved and reported only; Ollama chooses its own threads. Settings retain update-check hours, in-flight cap, answer cache size and warm-up. The model name is the restart setting `ollama_model` (else `SERVICE_OLLAMA_MODEL`).
 
 The Updates card compares the downloaded Ollama manifest digest with the online registry manifest at startup, every `update_check_hours` and on **Check now**. Checks fetch metadata only; only **Download** runs `ollama pull`. A successful download invalidates every replica through shared storage; each replica reloads on its next request.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from http.client import HTTPException
 import os
 import urllib.error
@@ -91,18 +91,30 @@ def _parallel() -> int:
         raise ValueError("SERVICE_OLLAMA_PARALLEL must be a whole number of 1 or more")
     return int(raw)
 
-def engine_from_env(prefix: str, engine_class: type, default_model: str, **options: Any) -> Any:
+def engine_from_env(prefix: str, engine_class: type, default_model: str, settings: Any = None, **options: Any) -> Any:
     """Always build an Ollama engine; an explicitly empty URL is a configuration error."""
     url = os.environ.get(f"{prefix}OLLAMA_URL", DEFAULT_URL).strip().rstrip("/")
     if not url:
         raise ValueError(f"{prefix}OLLAMA_URL must not be empty; set an Ollama server URL")
-    model = os.environ.get(f"{prefix}OLLAMA_MODEL", "").strip() or default_model
+    # With admin settings the model is the saved `ollama_model` (else SERVICE_OLLAMA_MODEL, else the default): the
+    # Model variant card saves it. Without them only the environment applies.
+    model = (settings.get("ollama_model") if settings is not None
+             else os.environ.get(f"{prefix}OLLAMA_MODEL", "").strip()) or default_model
 
     def local_digest(_: str) -> str | None:
         reply = _json_call(url, "/api/tags", None, 15, model)
         try:
             digest = next((m["digest"] for m in reply["models"] if m["name"] in (model, f"{model}:latest")), None)
             return digest.removeprefix("sha256:").lower() if digest else None
+        except _READ_ERRORS:
+            raise _unavailable(model) from None
+
+    def local_models() -> set[str]:
+        """Names of every model Ollama has on disk, with and without an implicit `:latest`."""
+        reply = _json_call(url, "/api/tags", None, 15, model)
+        try:
+            return {name.removesuffix(":latest") if name.endswith(":latest") and name.count(":") == 1 else name
+                    for name in (m["name"] for m in reply["models"])}
         except _READ_ERRORS:
             raise _unavailable(model) from None
 
@@ -137,4 +149,5 @@ def engine_from_env(prefix: str, engine_class: type, default_model: str, **optio
             raise _unavailable(model)
 
     return engine_class(model, parallel=_parallel(), loader=lambda source: OllamaLoaded(url, source),
-                        cached_sha=local_digest, remote_sha=remote_digest, download=pull, **options)
+                        cached_sha=local_digest, remote_sha=remote_digest, download=pull,
+                        local_models=local_models, same_machine=urlparse(url).hostname in ("127.0.0.1", "localhost", "::1"), **options)
