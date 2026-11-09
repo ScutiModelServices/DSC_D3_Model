@@ -15,9 +15,9 @@ Run the API directly on `127.0.0.1:29221`, with inference in a running Ollama.
 curl -X POST http://127.0.0.1:29221/admin/updates/weights -H "X-Internal-Token: <ADMIN_PASSWORD>"
 ```
 
-Use `run.bat run`, or choose Run from its menu. It syncs `.venv` and starts `python src/app.py --dotenv`. Copy `.env.example` only if needed, change `SERVICE_OLLAMA_URL` to `http://127.0.0.1:11434`, and set an admin password. When the URL is unset, the local default is `http://127.0.0.1:11434`; explicitly empty is an error.
+Use `run.bat run`, or choose Run from its menu. It syncs `.venv` and starts `python src/app.py --dotenv`. Copy `.env.example` to `.env.local` only if needed, change `SERVICE_OLLAMA_URL` to `http://127.0.0.1:11434`, and set an admin password. When the URL is unset, the local default is `http://127.0.0.1:11434`; explicitly empty is an error.
 
-`--dotenv` loads this folder's `.env` and prints names only; real environment variables win. A plain invocation does not read `.env`:
+`--dotenv` loads this folder's `.env.local`, then `.env` (the first file to set a name wins) and prints names only; real environment variables win. A plain invocation reads neither:
 
 ```bash
 uv run python src/app.py

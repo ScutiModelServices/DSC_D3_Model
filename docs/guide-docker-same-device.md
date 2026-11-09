@@ -13,7 +13,7 @@ Run d3 API replicas on port 29221, all connected to the same Ollama.
 
 ## Settings
 
-Copy `.env.example` to `.env`; saved admin settings take precedence over their environment defaults.
+Copy `.env.example` to `.env.compose`; saved admin settings take precedence over their environment defaults.
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -30,11 +30,11 @@ Admin settings: `update_check_hours` (6), `max_inflight` (0 = 4), `cache_size` (
 ## Start
 
 1. Start Ollama on a container-accessible interface and pull the configured model.
-2. Set the admin password and backend address in `.env`.
+2. Set the admin password and backend address in `.env.compose`.
 3. Start the API:
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env.compose up -d --build
 ```
 
 Tokens, settings and replica update markers live in `dsc_d3_model_data`. Ollama manages its own model storage. The former service weights volume is unused; see [migration notes](../CHANGELOG.md).
@@ -50,7 +50,7 @@ Warm-up runs in the background. The health endpoint and admin page remain availa
 ## Updating
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env.compose up -d --build
 docker compose restart dsc_d3_model_lb
 ```
 

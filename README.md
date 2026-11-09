@@ -60,10 +60,10 @@ curl -X POST http://127.0.0.1:29221/admin/updates/weights -H "X-Internal-Token: 
 ```
 
 ```bash
-docker compose up -d --build
+docker compose --env-file .env.compose up -d --build
 ```
 
-Docker defaults to `http://host.docker.internal:11434`. A local run defaults to `http://127.0.0.1:11434` when `SERVICE_OLLAMA_URL` is unset. An explicitly empty URL is an error. Without Docker use `run.bat run` with a running Ollama; when copying `.env.example`, change the Docker URL to the local one.
+Docker defaults to `http://host.docker.internal:11434`. A local run defaults to `http://127.0.0.1:11434` when `SERVICE_OLLAMA_URL` is unset. An explicitly empty URL is an error. Without Docker use `run.bat run` with a running Ollama; copy `.env.example` to `.env.local` and set the local URL there; `.env.compose` (Docker Desktop here) and `.env` (the deployment device) keep the Docker one.
 
 ```bash
 curl -X POST http://127.0.0.1:29221/v1/decide -H "Content-Type: application/json" -H "X-Internal-Token: d3_..." -d '{"state":"A customer says their card was charged twice.","questions":{"team":{"type":"choice","instructions":"Which team should handle this?","criteria":{"billing":"Invoices and charges","returns":"Refunds and replacements"}}}}'
