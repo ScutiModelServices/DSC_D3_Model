@@ -1,0 +1,54 @@
+# d3 API replicas share a running Ollama server; start Ollama and pull the configured model first.
+name: dsc_d3_model
+
+services:
+  dsc_d3_model:
+    build: .
+    image: dsc_d3_model:latest
+    restart: unless-stopped
+    mem_limit: ${SERVICE_MEM_LIMIT:-0}  # 0 = no cap; a cap makes an out-of-memory kill stay inside this container
+    environment:
+      SERVICE_ADMIN_PASSWORD: ${SERVICE_ADMIN_PASSWORD:-}
+      SERVICE_NUM_THREAD: ${SERVICE_NUM_THREAD:-}
+      SERVICE_OLLAMA_PARALLEL: ${SERVICE_OLLAMA_PARALLEL:-2}  # same value as OLLAMA_NUM_PARALLEL on your Ollama
+      SERVICE_REPLICAS: ${SERVICE_REPLICAS:-1}  # shown read-only on /admin/
+      SERVICE_OLLAMA_URL: ${SERVICE_OLLAMA_URL-http://host.docker.internal:11434}
+      SERVICE_OLLAMA_MODEL: ${SERVICE_OLLAMA_MODEL:-d3:2b}
+    extra_hosts: ["host.docker.internal:host-gateway"]  # reaches an Ollama running on the host
+    volumes:
+      - dsc_d3_model_data:/data
+    deploy:
+      replicas: ${SERVICE_REPLICAS:-1}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:29221/health')"]
+      interval: 15s
+      timeout: 5s
+      start_period: 300s
+    networks: [dsc_d3_model]
+
+  dsc_d3_model_lb:
+    container_name: dsc_d3_model_lb
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${SERVICE_PORT:-29221}:29221"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      dsc_d3_model:
+        condition: service_healthy
+    networks:
+      dsc_d3_model:
+      citadel:
+        aliases: [dsc_d3_model_lb]
+
+volumes:
+  dsc_d3_model_data:
+    name: dsc_d3_model_data
+networks:
+  # Other stacks reach http://dsc_d3_model_lb:29221 by joining this network.
+  dsc_d3_model:
+    name: dsc_d3_model
+  citadel:
+    name: citadel_core
+    external: true
