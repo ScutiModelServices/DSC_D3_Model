@@ -14,11 +14,13 @@ from contextlib import asynccontextmanager
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+import strategies
+from answers import check_questions
 from cache import AnswerCache
 from engine import DEFAULT_MODEL, D3Engine, EngineError, default_marker
 from ollama_backend import OllamaUpdates, engine_from_env
@@ -55,6 +57,34 @@ class DecideRequest(BaseModel):
 
     state: str = Field(max_length=100_000)
     questions: dict[str, Question] = Field(min_length=1, max_length=16)
+
+
+_Thresholds = dict[Literal["2", "3+"], dict[Literal["d3"], float]]
+
+
+class AskRequest(BaseModel):
+    """Laya's `/v1/ask` request without what d3 cannot do: `project`, `max_len` and `pair_ratio` are 422."""
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: Literal["d3-only", "d3-narrowing", "auto"] = strategies.DEFAULT_STRATEGY
+    text: str = Field(min_length=1, max_length=100_000)
+    questions: dict[str, Any]
+    min_confidence: float | None = Field(None, gt=0, le=1)
+    thresholds: _Thresholds = Field(default_factory=dict)
+    prune_ratio: float = Field(strategies.PRUNE_RATIO, ge=0, lt=1)
+    trace: bool = False
+    stream: bool = False  # true: each question's answer arrives as a JSON line when it is settled
+
+
+class ValidateRequest(BaseModel):
+    questions: Any
+
+
+class CombineRequest(BaseModel):
+    voters: dict[str, dict[str, Any]] = Field(min_length=1, max_length=4)
+    options: list[str] | None = Field(None, min_length=2, max_length=10)
+    prune_ratio: float = Field(strategies.PRUNE_RATIO, ge=0, lt=1)
+    pair_ratio: float = Field(strategies.PAIR_RATIO, gt=0, le=1)
 
 
 class SettingsUpdate(BaseModel):
@@ -205,6 +235,9 @@ def create_app(client: D3Engine | None = None, admin_password: str | None = None
         part = [client.generation, body.model_dump(mode="json")]
         return hashlib.sha256(json.dumps(part, sort_keys=True, default=str).encode()).hexdigest()
 
+    def line(event: dict[str, Any]) -> str:
+        return json.dumps(event, ensure_ascii=False) + "\n"
+
     @app.post("/v1/decide")
     async def decide(body: DecideRequest, response: Response, _auth: None = Depends(authorize),
                      _slot: None = Depends(slot)) -> Any:
@@ -229,6 +262,108 @@ def create_app(client: D3Engine | None = None, admin_password: str | None = None
             cache.put(key, result, size)
         response.headers["X-Cache"] = "miss"
         return result
+
+    @app.get("/v1/strategies", dependencies=[Depends(authorize)])
+    def list_strategies() -> dict[str, Any]:
+        return {"default": strategies.DEFAULT_STRATEGY, "strategies": list(strategies.STRATEGIES)}
+
+    def http_failure(error: Exception) -> HTTPException:
+        calls = getattr(error, "calls", [])
+        if isinstance(error, EngineError):
+            return HTTPException(422 if error.status == 400 else error.status or 500, {"message": str(error), "calls": calls})
+        if isinstance(error, ValueError):
+            return HTTPException(502, {"message": str(error), "calls": calls})
+        _log.error("d3 strategy failed", exc_info=error)
+        return HTTPException(500, "d3 could not answer")
+
+    def ask_key(body: AskRequest) -> str:
+        part = [client.generation, body.model_dump(mode="json", exclude={"stream"})]
+        return hashlib.sha256(json.dumps(part, sort_keys=True, default=str).encode()).hexdigest()
+
+    def ndjson_ask(lines: Any, cached: str) -> StreamingResponse:
+        return StreamingResponse(lines, media_type="application/x-ndjson", headers={"X-Cache": cached})
+
+    async def replay_ask(result: dict[str, Any]):
+        """A kept answer in the shape of a stream: each answer, then `done`."""
+        for qid, answer in result["answers"].items():
+            yield line({"type": "answer", "id": qid, "answer": answer})
+        yield line({"type": "done", **result})
+
+    async def live_ask(events: Any, first: tuple[str, Any] | None, key: str | None, size: int):
+        """One JSON line per question as it is settled, then `done` with the body a call without `stream` returns.
+        A failure after the first answer can only be sent as an `error` line."""
+        result: dict[str, Any] | None = None
+        try:
+            async def all_events():
+                if first is not None:
+                    yield first
+                async for event in events:
+                    yield event
+
+            async for kind, value in all_events():
+                if kind == "answer":
+                    yield line({"type": "answer", "id": value[0], "answer": value[1]})
+                else:
+                    result = value
+        except Exception as error:
+            failure = http_failure(error)
+            yield line({"type": "error", "status": failure.status_code, "detail": failure.detail})
+            return
+        finally:
+            await events.aclose()
+        if key and result is not None:
+            cache.put(key, result, size)
+        yield line({"type": "done", **(result or {})})
+
+    @app.post("/v1/ask")
+    async def ask(body: AskRequest, response: Response, _auth: None = Depends(authorize),
+                  _slot: None = Depends(slot)) -> Any:
+        """Laya-shaped: typed questions in, one settled answer per question out (see strategies.py)."""
+        try:
+            check_questions(body.questions)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        tuning = strategies.Tuning(body.min_confidence, body.thresholds, body.prune_ratio)
+        size = cache_limit()
+        key = ask_key(body) if size else None
+        kept = cache.get(key, size) if key else None
+        if kept is not None:
+            if body.stream:
+                return ndjson_ask(replay_ask(kept), "hit")
+            response.headers["X-Cache"] = "hit"
+            return kept
+        try:
+            if body.stream:
+                events = strategies.run_iter(client, body.strategy, body.text, body.questions, tuning, body.trace)
+                try:
+                    first = await anext(events, None)  # the first question is settled here, so a refusal is still an HTTP error
+                except BaseException:
+                    await events.aclose()
+                    raise
+                return ndjson_ask(live_ask(events, first, key, size), "miss")
+            result = await strategies.run(client, body.strategy, body.text, body.questions, tuning, body.trace)
+        except Exception as error:
+            raise http_failure(error) from None
+        if key:
+            cache.put(key, result, size)
+        response.headers["X-Cache"] = "miss"
+        return result
+
+    @app.post("/v1/validate", dependencies=[Depends(authorize)])
+    def validate(body: ValidateRequest) -> dict[str, bool]:
+        """The one definition of a valid question set (same rules as DSC_Laya_Model's)."""
+        try:
+            check_questions(body.questions)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
+        return {"ok": True}
+
+    @app.post("/v1/combine", dependencies=[Depends(authorize)])
+    def combine(body: CombineRequest) -> Any:
+        try:
+            return strategies.combine(body.voters, body.options, body.prune_ratio, body.pair_ratio)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise HTTPException(422, "voters must be answers to one choice question over the same options") from None
 
     @app.put("/admin/threads", dependencies=[Depends(admin)])
     def set_threads(body: Threads) -> dict[str, Any]:
